@@ -6,6 +6,10 @@ __pycache__/
 # C extensions
 *.so
 
+# Project specific
+secrets.toml
+data/
+
 # Distribution / packaging
 .Python
 build/
