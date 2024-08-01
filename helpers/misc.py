@@ -3,6 +3,8 @@ import streamlit as st
 import pandas as pd
 from typing import List
 import math
+import time
+import csv
 
     
 def write_df() -> bool:
@@ -23,6 +25,21 @@ def write_df() -> bool:
     except Exception as e:
         print(f'error writing csv: {e}')
         return False
+
+def add_meta() -> bool:
+    s3 = s3fs.S3FileSystem(
+        key=st.secrets["aws"]["PUBLIC_KEY"],
+        secret=st.secrets["aws"]["PRIVATE_KEY"]
+    )
+    s3_path = f's3://a6dev/annotations.csv'
+
+    # New row to add
+    new_row = [st.session_state['device_id'], st.session_state['user_id'], time.time() - st.session_state['start'], st.session_state['stats']['locates'], st.session_state['stats']['max_segment']]
+
+    # Append the new row directly to the file
+    with s3.open(s3_path, 'a') as f:
+        writer = csv.writer(f)
+        writer.writerow(new_row)
 
 def calculate_segments(segment: int, max_segments: int) -> List[int]:
     if segment == 0:
@@ -51,25 +68,25 @@ def format_minutes(minutes: int) -> str:
     days, mins = divmod(minutes, 1440)  # 1440 minutes in a day
     hours, mins = divmod(minutes, 60)   # 60 minutes in an hour
     if days > 0:
-        if days == 1:
-            return f"1 day"
-        else:
-            return f"{days:,.0f} days"
+        return f"{days:,.0f}d"
     elif hours > 0:
-        if hours == 1:
-            return f"1 hr"
-        else:
-            return f"{hours:,.0f} hrs"
+        return f"{hours:,.0f}hr"
     else:
-        if minutes <= 1:
-            return f"1 min"
-        else:
-            return f"{minutes:,.0f} mins"
+        return f"{minutes:,.0f}m"
     
 def format_speed(km, min):
     if math.isnan(km) or math.isnan(min):
-        return f"0.0km / min"
+        return f"0.0km/m"
     elif min <= 1:
-        return f"{km:,.1f}km / min"
+        return f"{km:,.0f}km/m"
     else:
-        return f"{km/min:,.1f}km / min"
+        return f"{km/min:,.0f}km/m"
+    
+
+def assign_color(fraud):
+    if pd.isna(fraud):
+        return 'gray'
+    elif fraud:
+        return 'green'
+    else:
+        return 'red'

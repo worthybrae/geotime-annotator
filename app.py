@@ -8,8 +8,8 @@ import snowflake.connector
 import pydeck as pdk
 import streamlit_shortcuts
 from streamlit_extras.keyboard_text import key, load_key_css
-from typing import List, Dict, Optional, Tuple
-from helpers.misc import write_df, format_minutes, calculate_zoom_level, calculate_radius, format_speed
+import plotly.graph_objects as go
+from helpers.misc import write_df, format_minutes, calculate_zoom_level, calculate_radius, format_speed, add_meta
 
 
 # API Functions
@@ -31,6 +31,7 @@ def start() -> bool:
 
             grouped_df = df.groupby(['segment']).agg({
                 'id': 'count',  # Count total rows
+                'timestamp': 'min',
                 'min_duration': 'max',
                 'dist_travelled': 'max',
                 'start_lat': 'max',
@@ -47,15 +48,18 @@ def start() -> bool:
                 'dupes': 'sum'
             }).reset_index()
 
+            grouped_df['min_duration'] = grouped_df['min_duration'].fillna(0)
+            grouped_df['min_jump'] = grouped_df['min_jump'].fillna(0)
+
             grouped_df['quality'] = (
-                25 * (np.minimum(grouped_df['supply_id'], 3) / 3) +
-                30 * (np.minimum(grouped_df['min_duration'], 60) / 60) + 
-                25 * (np.minimum(grouped_df['id'], 50) / 50) + 
-                10 * grouped_df['speed_flag'] +
-                10 * grouped_df['supplier_flag']
+                20 * (np.minimum(grouped_df['supply_id'], 3) / 3) +
+                30 * (np.minimum((grouped_df['min_duration'] - grouped_df['min_jump']), 240) / 240) + 
+                20 * (np.minimum(grouped_df['id'], 100) / 100) + 
+                30 * grouped_df['speed_flag']
             )
+            grouped_df = grouped_df.sort_values(by=['segment']).reset_index(drop=True)
             avg_quality = np.average(grouped_df['quality'], weights=grouped_df['id'])
-            null_fraud_row = df[df['fraud'].isnull()].head(1)
+            null_fraud_row = grouped_df[grouped_df['fraud'].isnull()].head(1)
             starting_segment = int(null_fraud_row['segment'].iloc[0])
             annotated = max(0, max_segment - int(grouped_df['fraud'].isna().sum()))
             total_dupes_sum = grouped_df['dupes'].sum()
@@ -68,11 +72,12 @@ def start() -> bool:
                 'locates': total_dupes_sum,
                 'avg_quality': avg_quality
             }
-
             st.session_state['stats'] = stats
             st.session_state['df'] = df
             st.session_state['segment_df'] = grouped_df
             st.session_state['annotations'] = {}
+            st.session_state['start'] = time.time()
+            
             return True
     except Exception as e:
         print(f'error reading s3 file: {e}')
@@ -221,10 +226,10 @@ def query(device_id: str, minutes: int, truncation: int, km_threshold: int) -> b
     df = pd.DataFrame(results, columns=columns)
     df['fraud'] = None        
     max_segment = df['segment'].max()
-    np.max
 
     grouped_df = df.groupby(['segment']).agg({
         'id': 'count',  # Count total rows
+        'timestamp': 'min',
         'min_duration': 'max',
         'dist_travelled': 'max',
         'start_lat': 'max',
@@ -240,14 +245,16 @@ def query(device_id: str, minutes: int, truncation: int, km_threshold: int) -> b
         'supply_id': pd.Series.nunique,
         'dupes': 'sum'
     }).reset_index()
+    grouped_df['min_duration'] = grouped_df['min_duration'].fillna(0)
+    grouped_df['min_jump'] = grouped_df['min_jump'].fillna(0)
     total_dupes_sum = grouped_df['dupes'].sum()
     grouped_df['quality'] = (
-        25 * (np.minimum(grouped_df['supply_id'], 3) / 3) +
-        30 * (np.minimum(grouped_df['min_duration'], 60) / 60) + 
-        25 * (np.minimum(grouped_df['id'], 50) / 50) + 
-        10 * grouped_df['speed_flag'] +
-        10 * grouped_df['supplier_flag']
+        20 * (np.minimum(grouped_df['supply_id'], 3) / 3) +
+        30 * (np.minimum(grouped_df['min_duration'] - grouped_df['min_jump'], 240) / 240) + 
+        20 * (np.minimum(grouped_df['id'], 100) / 100) + 
+        30 * grouped_df['speed_flag']
     )
+
     avg_quality = np.average(grouped_df['quality'], weights=grouped_df['id'])
 
     stats = {
@@ -263,6 +270,7 @@ def query(device_id: str, minutes: int, truncation: int, km_threshold: int) -> b
     st.session_state['df'] = df
     st.session_state['segment_df'] = grouped_df
     st.session_state['annotations'] = {}
+    st.session_state['start'] = time.time()
     
     # Create an S3 filesystem object with your credentials
     outcome = write_df()
@@ -274,32 +282,35 @@ def query(device_id: str, minutes: int, truncation: int, km_threshold: int) -> b
     return True
 
 # Create color column based on segment values
-def get_color(segment):
+def get_map_color(segment):
     colors = {
-        'current': [46, 41, 78],  # Hex: #2e294e
-        'previous': [244, 96, 54],  # Hex: #f46036
-        'next': [27, 153, 139],  # Hex: #1b998b
-        'default': [105, 105, 105, 0.25]  # Darker gray with 0.25 opacity
+        'current': '#254441',
+        'previous': '#ff6f59',  
+        'next': '#43aa8b'
     }
     if segment == st.session_state['stats']['current_segment']:
         return colors['current']
-    elif segment == st.session_state['stats']['current_segment'] - 1:
+    elif segment < st.session_state['stats']['current_segment']:
         return colors['previous']
-    elif segment == st.session_state['stats']['current_segment'] + 1:
-        return colors['next']
     else:
-        return colors['default']
+        return colors['next']
+    
+def get_matrix_color(fraud):
+    if pd.isna(fraud):
+        return 'rgba(163, 186, 195, .1)'  # Example with 50% opacity
+    elif fraud == True:
+        return 'rgba(67, 170, 139, .75)'  # Example with 80% opacity
+    else:
+        return 'rgba(255, 111, 89, .75)'  # Example with 70% opacity
 
 # Callbacks
 def previous_callback():
-    if 0 < st.session_state['stats']['current_segment']:
-        st.session_state['stats']['current_segment'] -= 1
-        st.session_state['rerun'] = True
+    st.session_state['stats']['current_segment'] = max(0, st.session_state['stats']['current_segment']-1)
+    st.session_state['rerun'] = True
 
 def next_callback():
-    if st.session_state['stats']['current_segment'] + 1 < st.session_state['stats']['max_segment']:
-        st.session_state['stats']['current_segment'] += 1
-        st.session_state['rerun'] = True
+    st.session_state['stats']['current_segment'] = min(st.session_state['stats']['max_segment'], st.session_state['stats']['current_segment']+1)
+    st.session_state['rerun'] = True
 
 def valid_callback():
     if st.session_state['stats']['current_segment'] in st.session_state['annotations']:
@@ -307,24 +318,27 @@ def valid_callback():
         if current_annotation:
             pass
         else:
-            df = st.session_state['df']
-            grouped_df = st.session_state['segment_df']
             st.session_state['annotations'][st.session_state['stats']['current_segment']] = True
-            df.loc[df['segment'] == st.session_state['stats']['current_segment'], 'fraud'] = True
-            grouped_df.loc[grouped_df['segment'] == st.session_state['stats']['current_segment'], 'fraud'] = True
-
-        st.session_state['stats']['current_segment'] = min(st.session_state['stats']['current_segment'] + 1, st.session_state['stats']['max_segment'])
+            st.session_state['df'].loc[st.session_state['df']['segment'] == st.session_state['stats']['current_segment'], 'fraud'] = True
+            st.session_state['segment_df'].loc[st.session_state['segment_df']['segment'] == st.session_state['stats']['current_segment'], 'fraud'] = True
+        st.session_state['stats']['current_segment'] = min(st.session_state['stats']['current_segment'] + 1, st.session_state['stats']['max_segment'])    
         st.session_state['rerun'] = True
         return
     else:
-        df = st.session_state['df']
-        grouped_df = st.session_state['segment_df']
         st.session_state['annotations'][st.session_state['stats']['current_segment']] = True
-        df.loc[df['segment'] == st.session_state['stats']['current_segment'], 'fraud'] = True
-        grouped_df.loc[grouped_df['segment'] == st.session_state['stats']['current_segment'], 'fraud'] = True
-        st.session_state['stats']['annotated'] += 1
-    
+        st.session_state['df'].loc[st.session_state['df']['segment'] == st.session_state['stats']['current_segment'], 'fraud'] = True
+        st.session_state['segment_df'].loc[st.session_state['segment_df']['segment'] == st.session_state['stats']['current_segment'], 'fraud'] = True
+        st.session_state['stats']['annotated'] = st.session_state['stats']['max_segment'] - st.session_state['segment_df']['fraud'].isna().sum()
+        if st.session_state['stats']['annotated'] == st.session_state['stats']['max_segment']:
+            st.balloons()
+            time.sleep(5)
+            add_meta()
+
     if len(st.session_state['annotations']) > 10:
+        outcome = write_df()
+        if outcome:
+            st.session_state['annotations'] = {}
+    elif int(st.session_state['stats']['annotated']) == int(st.session_state['stats']['max_segment']):
         outcome = write_df()
         if outcome:
             st.session_state['annotations'] = {}
@@ -336,11 +350,9 @@ def invalid_callback():
     if st.session_state['stats']['current_segment'] in st.session_state['annotations']:
         current_annotation = st.session_state['annotations'][st.session_state['stats']['current_segment']]
         if current_annotation:
-            df = st.session_state['df']
-            grouped_df = st.session_state['segment_df']
             st.session_state['annotations'][st.session_state['stats']['current_segment']] = False
-            df.loc[df['segment'] == st.session_state['stats']['current_segment'], 'fraud'] = False
-            grouped_df.loc[grouped_df['segment'] == st.session_state['stats']['current_segment'], 'fraud'] = False
+            st.session_state['df'].loc[st.session_state['df']['segment'] == st.session_state['stats']['current_segment'], 'fraud'] = False
+            st.session_state['segment_df'].loc[st.session_state['segment_df']['segment'] == st.session_state['stats']['current_segment'], 'fraud'] = False
         else:
             pass
 
@@ -348,14 +360,20 @@ def invalid_callback():
         st.session_state['rerun'] = True
         return
     else:
-        df = st.session_state['df']
-        grouped_df = st.session_state['segment_df']
         st.session_state['annotations'][st.session_state['stats']['current_segment']] = False
-        df.loc[df['segment'] == st.session_state['stats']['current_segment'], 'fraud'] = False
-        grouped_df.loc[grouped_df['segment'] == st.session_state['stats']['current_segment'], 'fraud'] = False
-        st.session_state['stats']['annotated'] += 1
-    
+        st.session_state['df'].loc[st.session_state['df']['segment'] == st.session_state['stats']['current_segment'], 'fraud'] = False
+        st.session_state['segment_df'].loc[st.session_state['segment_df']['segment'] == st.session_state['stats']['current_segment'], 'fraud'] = False
+        st.session_state['stats']['annotated'] = st.session_state['stats']['max_segment'] - st.session_state['segment_df']['fraud'].isna().sum()
+        if st.session_state['stats']['annotated'] == st.session_state['stats']['max_segment']:
+            st.balloons()
+            time.sleep(5)
+            add_meta()
+
     if len(st.session_state['annotations']) > 10:
+        outcome = write_df()
+        if outcome:
+            st.session_state['annotations'] = {}
+    elif int(st.session_state['stats']['annotated']) == int(st.session_state['stats']['max_segment']):
         outcome = write_df()
         if outcome:
             st.session_state['annotations'] = {}
@@ -371,46 +389,140 @@ def refresh_callback():
 def render_map():
 
     if 'device_id' not in st.session_state:
-        st.subheader('Definitions')
-        st.text('device id: the device you are looking to analyze')
-        st.text('truncation: the number of decimal places in the latitutde and longitude values used to determine duplication')
-        st.text('minutes: the minute interval used to determine duplication')
-        st.text('km threshold: the km threshold used to create a new segment')
-        st.text('segment: a group of locates that are grouped together by their geo-time position')
+        with st.container(border=True):
+            st.subheader('definitions')
+            st.text('device id: the device you are looking to analyze')
+            st.text('truncation: the number of decimal places in the latitutde and longitude values used to determine duplication')
+            st.text('minutes: the minute interval used to determine duplication')
+            st.text('km threshold: the km threshold used to create a new segment')
+            st.text('segment: a group of locates that are grouped together by their geographical position')
+        s3 = s3fs.S3FileSystem(
+            key=st.secrets["aws"]["PUBLIC_KEY"],
+            secret=st.secrets["aws"]["PRIVATE_KEY"]
+        )
+
+        # Specify the S3 path to your CSV file
+        s3_path = f"s3://a6dev/annotations.csv"
+
+        # Read the CSV file directly from S3 into a pandas DataFrame
+        with s3.open(s3_path, 'rb') as f:
+            df = pd.read_csv(f)
+            result = df.groupby('user_id').agg(
+                devices=('device_id', 'nunique'),
+                total_seconds=('seconds', 'sum'),
+                total_locates=('locates', 'sum')
+            ).reset_index()
+
+            # Order by total_locates in descending order
+            result = result.sort_values(by='total_locates', ascending=False)
+            result['rank'] = result.index + 1
+            result['minutes'] = (result['total_seconds'] / 60).round().astype(int)
+
+            # Rename the columns
+            result = result[['rank', 'user_id', 'devices', 'minutes', 'total_locates']]
+            result.columns = ['Rank', 'User', 'Devices', 'Minutes', 'Locates']
+        with st.container(border=True):
+            st.subheader('leaderboard')
+            st.table(result.set_index('Rank'))
         return
     else:
         grouped_df = st.session_state['segment_df']
-        filtered_df = grouped_df[grouped_df['segment'].isin([x for x in range(max(0, st.session_state['stats']['current_segment'] - 2), min(st.session_state['stats']['current_segment'] + 3, st.session_state['stats']['max_segment']))])].copy()
-        filtered_df.loc[:, 'color'] = filtered_df['segment'].apply(get_color)
+        filtered_df = grouped_df[grouped_df['segment'].isin([x for x in range(max(0, st.session_state['stats']['current_segment'] - 1), min(st.session_state['stats']['current_segment'] + 2, st.session_state['stats']['max_segment']+1))])].copy()
         filtered_df = filtered_df.sort_values(by=['segment']).reset_index(drop=True)
-        target_segment = filtered_df.loc[filtered_df['segment'] == st.session_state['stats']['current_segment']]
+        current_segment = filtered_df.loc[filtered_df['segment'] == st.session_state['stats']['current_segment']]
+        previous_segment = filtered_df.loc[filtered_df['segment'] == st.session_state['stats']['current_segment'] - 1]
+        next_segment = filtered_df.loc[filtered_df['segment'] == st.session_state['stats']['current_segment'] + 1]
+        points = []
+        lines = []
+        if len(previous_segment) == 1:
+            points.append({
+                'latitude': previous_segment['start_lat'].values[0],
+                'longitude': previous_segment['start_lon'].values[0],
+                'color': [255, 111, 89]
+            })
+            points.append({
+                'latitude': previous_segment['end_lat'].values[0],
+                'longitude': previous_segment['end_lon'].values[0],
+                'color': [255, 111, 89]
+            })
+            lines.append({
+                'source_lon': previous_segment['start_lon'].values[0],
+                'source_lat': previous_segment['start_lat'].values[0],
+                'target_lon': previous_segment['end_lon'].values[0],
+                'target_lat': previous_segment['end_lat'].values[0],
+                'color': [255, 111, 89]
+            })
+            lines.append({
+                'source_lon': previous_segment['end_lon'].values[0],
+                'source_lat': previous_segment['end_lat'].values[0],
+                'target_lon': current_segment['start_lon'].values[0],
+                'target_lat': current_segment['start_lat'].values[0],
+                'color': [255, 111, 89]
+            })
+        points.append({
+            'latitude': current_segment['start_lat'].values[0],
+            'longitude': current_segment['start_lon'].values[0],
+            'color': [37, 68, 65]
+        })
+        points.append({
+            'latitude': current_segment['end_lat'].values[0],
+            'longitude': current_segment['end_lon'].values[0],
+            'color': [37, 68, 65]
+        })
+        lines.append({
+            'source_lon':  current_segment['start_lon'].values[0],
+            'source_lat':  current_segment['start_lat'].values[0],
+            'target_lon':  current_segment['end_lon'].values[0],
+            'target_lat':  current_segment['end_lat'].values[0],
+            'color': [37, 68, 65]
+        })
+        if len(next_segment) == 1:
+            points.append({
+                'latitude': next_segment['start_lat'].values[0],
+                'longitude': next_segment['start_lon'].values[0],
+                'color': [67, 170, 139]
+            })
+            points.append({
+                'latitude': next_segment['end_lat'].values[0],
+                'longitude': next_segment['end_lon'].values[0],
+                'color': [67, 170, 139]
+            })
+            lines.append({
+                'source_lon': next_segment['start_lon'].values[0],
+                'source_lat': next_segment['start_lat'].values[0],
+                'target_lon': next_segment['end_lon'].values[0],
+                'target_lat': next_segment['end_lat'].values[0],
+                'color': [67, 170, 139]
+            })
+            lines.append({
+                'source_lon': current_segment['end_lon'].values[0],
+                'source_lat': current_segment['end_lat'].values[0],
+                'target_lon': next_segment['start_lon'].values[0],
+                'target_lat': next_segment['start_lat'].values[0],
+                'color': [67, 170, 139]
+            })
 
-        # Calculate the approximate distance in degrees for latitude and longitude
-
-        zoom_level = calculate_zoom_level(target_segment['km_jump'].values[0])
-        radius = calculate_radius(zoom_level)
+        if pd.isna(current_segment['km_jump'].values[0]):
+            zoom_level = calculate_zoom_level(next_segment['km_jump'].values[0])
+            radius = calculate_radius(zoom_level)
+        else:
+            # Calculate the approximate distance in degrees for latitude and longitude
+            zoom_level = calculate_zoom_level(current_segment['km_jump'].values[0])
+            radius = calculate_radius(zoom_level)
 
         point_layer = pdk.Layer(
             'ScatterplotLayer',
-            filtered_df,
-            get_position=['start_lon', 'start_lat'],
+            points,
+            get_position='[longitude, latitude]',
             get_color='color',
             get_radius=radius,
             pickable=True
         )
 
-        line_df = pd.DataFrame({
-            'source_lon': filtered_df['start_lon'],
-            'source_lat': filtered_df['start_lat'],
-            'target_lon': filtered_df['start_lon'].shift(-1),
-            'target_lat': filtered_df['start_lat'].shift(-1),
-            'color': filtered_df['color']
-        })
-
         # Define the line layer using the original filtered_df
         line_layer = pdk.Layer(
             'LineLayer',
-            data=line_df,
+            data=lines,
             get_source_position=['source_lon', 'source_lat'],
             get_target_position=['target_lon', 'target_lat'],
             get_color='color',
@@ -419,8 +531,8 @@ def render_map():
         )
 
         view_state = pdk.ViewState(
-            latitude=target_segment['start_lat'].values[0],
-            longitude=target_segment['start_lon'].values[0],
+            latitude=current_segment['start_lat'].values[0],
+            longitude=current_segment['start_lon'].values[0],
             zoom=zoom_level,
             pitch=0,
         )
@@ -438,45 +550,98 @@ def render_map():
 def render_sidebar():
     # Sidebar for user inputs
     with st.sidebar:   
-        if 'device_id' not in st.session_state:
+        if 'df' not in st.session_state:
+            user_id = st.text_input('enter username:', 'w71')
             device_id = st.text_input("enter device id:", '00000000-0000-0000-0000-000000000000', max_chars=36)
             truncation = st.number_input("enter truncation:", value=4, min_value=3, max_value=6)
             minutes = st.number_input("enter minutes:", value=1, min_value=1, max_value=60)
-            km_threshold = st.number_input("enter km threshold:", value=5, min_value=1, max_value=1000)
+            km_threshold = st.number_input("enter km threshold:", value=10, min_value=1, max_value=1000)
             if st.button('search'):
                 try:
                     uuid.UUID(device_id)
+                    st.session_state['user_id'] = user_id
+                    st.session_state['device_id'] = device_id
+                    st.session_state['truncation'] = truncation
+                    st.session_state['minutes'] = minutes
+                    st.session_state['km_threshold'] = km_threshold
                 except ValueError:
                     st.error(f"Device ID entered is not in uuid format")
                     return False
-                with st.spinner('getting data from snowflake...'):
+                with st.spinner('checking if data exists...'):
                     outcome = start()
-                    if outcome:
-                        st.session_state['device_id'] = device_id
-                        st.session_state['truncation'] = truncation
-                        st.session_state['minutes'] = minutes
-                        st.session_state['km_threshold'] = km_threshold
-                        st.session_state['rerun'] = True 
-                    else:
+                if outcome:
+                    st.session_state['rerun'] = True 
+                else:
+                    with st.spinner('querying data from snowflake...'):
                         q_outcome = query(device_id, minutes, truncation, km_threshold)
-                        if q_outcome:
-                            st.session_state['device_id'] = device_id
-                            st.session_state['truncation'] = truncation
-                            st.session_state['minutes'] = minutes
-                            st.session_state['km_threshold'] = km_threshold
-                            st.session_state['rerun'] = True 
+                    if q_outcome:
+                        st.session_state['rerun'] = True 
         else:
             st.subheader(f"{st.session_state['device_id']}")
             if 'stats' in st.session_state:
                 with st.container(border=True):
                     st.text(f"locates: {st.session_state['stats']['locates']:,.0f}")
                     st.text(f"duplication: {st.session_state['stats']['duplicates']/st.session_state['stats']['locates']*100:,.1f}%")
-                    st.text(f"position ({st.session_state['stats']['current_segment']:,.0f}/{st.session_state['stats']['max_segment']:,.0f})")
+                    st.text(f"quality: {st.session_state['stats']['avg_quality']:,.1f}%")
+                    st.text(f"position: {st.session_state['stats']['current_segment']/st.session_state['stats']['max_segment']*100:,.1f}%")
                     st.progress(st.session_state['stats']['current_segment']/st.session_state['stats']['max_segment'])
-                    st.text(f"reviewed ({st.session_state['stats']['annotated']:,.0f}/{st.session_state['stats']['max_segment']:,.0f})")
+                    st.text(f"reviewed: {st.session_state['stats']['annotated']/st.session_state['stats']['max_segment']*100:,.1f}%")
                     st.progress(st.session_state['stats']['annotated']/st.session_state['stats']['max_segment']) 
- 
+                with st.container(border=True):
+                    grouped_df = st.session_state['segment_df']
+                    filtered_df = grouped_df[grouped_df['segment'].isin([x for x in range(max(0, st.session_state['stats']['current_segment'] - 16), min(st.session_state['stats']['current_segment'] + 16, st.session_state['stats']['max_segment']+1))])].copy()
+                    filtered_df.loc[:, 'matrix_color'] = filtered_df['fraud'].apply(get_matrix_color)
+                    filtered_df.loc[filtered_df['segment'] == st.session_state['stats']['current_segment'], 'matrix_color'] = 'rgba(255, 209, 102, 255)'
+                    filtered_df['size'] = 8
+                    filtered_df.loc[filtered_df['segment'] == st.session_state['stats']['current_segment'], 'size'] = 24
+                    
+                    scatter = go.Scatter3d(
+                        x=filtered_df['start_lon'],
+                        y=filtered_df['start_lat'],
+                        z=filtered_df['timestamp'],
+                        mode='markers',
+                        marker=dict(
+                            size=filtered_df['size'],
+                            color=filtered_df['matrix_color']
+                        )
+                    )
 
+                    # Create the line trace
+                    line = go.Scatter3d(
+                        x=filtered_df['start_lon'],
+                        y=filtered_df['start_lat'],
+                        z=filtered_df['timestamp'],
+                        mode='lines',
+                        line=dict(color='rgba(100, 100, 100, 0.5)', width=2)
+                    )
+
+                    # Combine both traces
+                    fig = go.Figure(data=[scatter, line])
+
+                    # Update layout
+                    fig.update_layout(
+                        showlegend=False,  # This removes the legend
+                        scene=dict(
+                            xaxis_title='lon',
+                            yaxis_title='lat',
+                            zaxis_title='',
+                            xaxis=dict(title_font=dict(size=14)),
+                            yaxis=dict(title_font=dict(size=14)),
+                            zaxis=dict(title_font=dict(size=14)),
+                            dragmode='orbit'
+                        ),
+                        scene_camera=dict(
+                            up=dict(x=0, y=0, z=1),
+                            center=dict(x=0, y=0, z=0),
+                            eye=dict(x=1.5, y=1.5, z=1.5)
+                        )
+                    )
+
+                    st.text('locate explorer')
+                    # Display the plot in Streamlit
+                    st.plotly_chart(fig)
+
+            # Nav
             with st.container(height=300):
                 st.text('navigation')
                 load_key_css()
@@ -527,15 +692,15 @@ def render_stats():
                 scol1, scol2 = st.columns(2)
                 with scol1:
                     st.text(f"locates: {target_segment['id'].values[0]:,.0f}")
-                    st.text(f"time seen: {format_minutes(target_segment['min_duration'].values[0])}")
+                    st.text(f"apps: {target_segment['supply_id'].values[0]:,.0f}")
+                    st.text(f"quality: {target_segment['quality'].values[0]:,.0f}%")
                 with scol2:
                     st.text(f"speed: {format_speed(target_segment['km_jump'].values[0], target_segment['min_jump'].values[0])}")
-                    st.text(f"apps: {target_segment['supply_id'].values[0]:,.0f} apps")
-                if target_segment['quality'].values[0] >= 0:
-                    st.text(f"quality: {target_segment['quality'].values[0]:,.1f}%")
+                    st.text(f"time seen: {format_minutes(target_segment['min_duration'].values[0]-target_segment['min_jump'].values[0])}")
+                    st.text(f"distance: {target_segment['dist_travelled'].values[0]-target_segment['km_jump'].values[0]:,.0f}km")
+                if target_segment['quality'].values[0] >= 0:          
                     st.progress(target_segment['quality'].values[0]/100) 
                 else:
-                    st.text(f"quality: 0%")
                     st.progress(0) 
                 sub1, sub2, sub3 = st.columns(3)
                 with sub1:
@@ -566,15 +731,15 @@ def render_stats():
             scol1, scol2 = st.columns(2)
             with scol1:
                 st.text(f"locates: {target_segment['id'].values[0]:,.0f}")
-                st.text(f"time seen: {format_minutes(target_segment['min_duration'].values[0])}")
+                st.text(f"apps: {target_segment['supply_id'].values[0]:,.0f}")
+                st.text(f"quality: {target_segment['quality'].values[0]:,.0f}%")
             with scol2:
                 st.text(f"speed: {format_speed(target_segment['km_jump'].values[0], target_segment['min_jump'].values[0])}")
-                st.text(f"apps: {target_segment['supply_id'].values[0]:,.0f} apps")
-            if target_segment['quality'].values[0] >= 0:
-                st.text(f"quality: {target_segment['quality'].values[0]:,.1f}%")
+                st.text(f"time seen: {format_minutes(target_segment['min_duration'].values[0]-target_segment['min_jump'].values[0])}")
+                st.text(f"distance: {target_segment['dist_travelled'].values[0]-target_segment['km_jump'].values[0]:,.0f}km")
+            if target_segment['quality'].values[0] >= 0:          
                 st.progress(target_segment['quality'].values[0]/100) 
             else:
-                st.text(f"quality: 0%")
                 st.progress(0) 
             sub1, sub2, sub3 = st.columns(3)
             with sub1:
@@ -606,16 +771,16 @@ def render_stats():
                 scol1, scol2 = st.columns(2)
                 with scol1:
                     st.text(f"locates: {target_segment['id'].values[0]:,.0f}")
-                    st.text(f"time seen: {format_minutes(target_segment['min_duration'].values[0])}")
+                    st.text(f"apps: {target_segment['supply_id'].values[0]:,.0f}")
+                    st.text(f"quality: {target_segment['quality'].values[0]:,.0f}%")
                 with scol2:
                     st.text(f"speed: {format_speed(target_segment['km_jump'].values[0], target_segment['min_jump'].values[0])}")
-                    st.text(f"apps: {target_segment['supply_id'].values[0]:,.0f} apps")
-                if target_segment['quality'].values[0] >= 0:
-                    st.text(f"quality: {target_segment['quality'].values[0]:,.1f}%")
+                    st.text(f"time seen: {format_minutes(target_segment['min_duration'].values[0]-target_segment['min_jump'].values[0])}")
+                    st.text(f"distance: {target_segment['dist_travelled'].values[0]-target_segment['km_jump'].values[0]:,.0f}km")
+                if target_segment['quality'].values[0] >= 0:         
                     st.progress(target_segment['quality'].values[0]/100) 
                 else:
-                    st.text(f"quality: 0%")
-                    st.progress(0)  
+                    st.progress(0)   
                 sub1, sub2, sub3 = st.columns(3)
                 with sub1:
                     if int(target_segment['speed_flag'].values[0]) == 1:
