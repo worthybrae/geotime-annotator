@@ -438,19 +438,20 @@ def render_map():
         return
     else:
         grouped_df = st.session_state['segment_df']
-        filtered_df = grouped_df[grouped_df['segment'].isin([x for x in range(max(0, st.session_state['stats']['current_segment'] - 51), min(st.session_state['stats']['current_segment'] + 51, st.session_state['stats']['max_segment']+1))])].copy()
+        filtered_df = grouped_df[
+            (grouped_df['segment'].isin([x for x in range(max(0, st.session_state['stats']['current_segment'] - 51), min(st.session_state['stats']['current_segment'] + 52, st.session_state['stats']['max_segment']+1))])) &
+            ((grouped_df['segment'] >= st.session_state['stats']['current_segment']) | (grouped_df['fraud'] == True))
+        ].copy()
         filtered_df = filtered_df.sort_values(by=['segment']).reset_index(drop=True)
         current_segment = filtered_df.loc[filtered_df['segment'] == st.session_state['stats']['current_segment']]
-        current_segment = filtered_df.loc[filtered_df['segment'] == st.session_state['stats']['current_segment']+1]
-        filtered_df = grouped_df[grouped_df['segment'].isin([x for x in range(max(0, st.session_state['stats']['current_segment'] - 51), min(st.session_state['stats']['current_segment'] + 51, st.session_state['stats']['max_segment']+1))])].copy()
-        filtered_df = filtered_df.sort_values(by=['segment']).reset_index(drop=True)
+        next_segment = filtered_df.loc[filtered_df['segment'] == st.session_state['stats']['current_segment']+1]
 
         if pd.isna(current_segment['km_jump'].values[0]):
             zoom_level = calculate_zoom_level(next_segment['km_jump'].values[0])
             radius = calculate_radius(zoom_level)
         else:
             # Calculate the approximate distance in degrees for latitude and longitude
-            zoom_level = calculate_zoom_level(current_segment['km_jump'].values[0])
+            zoom_level = calculate_zoom_level(next_segment['km_jump'].values[0])
             radius = calculate_radius(zoom_level)
 
         points = []
