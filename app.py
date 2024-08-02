@@ -45,6 +45,7 @@ def start() -> bool:
                 'supplier_flag': 'max',
                 'fraud': 'max',
                 'supply_id': pd.Series.nunique,
+                'has_742': 'max',
                 'dupes': 'sum'
             }).reset_index()
 
@@ -52,16 +53,22 @@ def start() -> bool:
             grouped_df['min_jump'] = grouped_df['min_jump'].fillna(0)
 
             grouped_df['quality'] = (
-                20 * (np.minimum(grouped_df['supply_id'], 3) / 3) +
-                30 * (np.minimum((grouped_df['min_duration'] - grouped_df['min_jump']), 240) / 240) + 
+                20 * (np.minimum(grouped_df['has_742'], 3) / 3) +
+                30 * (np.minimum(grouped_df['min_duration'] - grouped_df['min_jump'], 240) / 240) + 
                 20 * (np.minimum(grouped_df['id'], 100) / 100) + 
                 30 * grouped_df['speed_flag']
             )
+
             grouped_df = grouped_df.sort_values(by=['segment']).reset_index(drop=True)
+
             avg_quality = np.average(grouped_df['quality'], weights=grouped_df['id'])
+
             null_fraud_row = grouped_df[grouped_df['fraud'].isnull()].head(1)
+
             starting_segment = int(null_fraud_row['segment'].iloc[0])
+
             annotated = max(0, max_segment - int(grouped_df['fraud'].isna().sum()))
+
             total_dupes_sum = grouped_df['dupes'].sum()
             
             stats = {
@@ -224,7 +231,10 @@ def query(device_id: str, minutes: int, truncation: int, km_threshold: int) -> b
     
     # Convert results to DataFrame
     df = pd.DataFrame(results, columns=columns)
-    df['fraud'] = None        
+    df['fraud'] = None
+    df['has_742'] = 0
+    df.loc[df['supply_id'] == '742', 'has_742'] = 1  
+    df.loc[df['has_742'] == 1, 'fraud'] = True      
     max_segment = df['segment'].max()
 
     grouped_df = df.groupby(['segment']).agg({
@@ -243,13 +253,14 @@ def query(device_id: str, minutes: int, truncation: int, km_threshold: int) -> b
         'supplier_flag': 'max',
         'fraud': 'max',
         'supply_id': pd.Series.nunique,
+        'has_742': 'max',
         'dupes': 'sum'
     }).reset_index()
     grouped_df['min_duration'] = grouped_df['min_duration'].fillna(0)
     grouped_df['min_jump'] = grouped_df['min_jump'].fillna(0)
     total_dupes_sum = grouped_df['dupes'].sum()
     grouped_df['quality'] = (
-        20 * (np.minimum(grouped_df['supply_id'], 3) / 3) +
+        20 * (np.minimum(grouped_df['has_742'], 3) / 3) +
         30 * (np.minimum(grouped_df['min_duration'] - grouped_df['min_jump'], 240) / 240) + 
         20 * (np.minimum(grouped_df['id'], 100) / 100) + 
         30 * grouped_df['speed_flag']
@@ -427,80 +438,12 @@ def render_map():
         return
     else:
         grouped_df = st.session_state['segment_df']
-        filtered_df = grouped_df[grouped_df['segment'].isin([x for x in range(max(0, st.session_state['stats']['current_segment'] - 1), min(st.session_state['stats']['current_segment'] + 2, st.session_state['stats']['max_segment']+1))])].copy()
+        filtered_df = grouped_df[grouped_df['segment'].isin([x for x in range(max(0, st.session_state['stats']['current_segment'] - 51), min(st.session_state['stats']['current_segment'] + 51, st.session_state['stats']['max_segment']+1))])].copy()
         filtered_df = filtered_df.sort_values(by=['segment']).reset_index(drop=True)
         current_segment = filtered_df.loc[filtered_df['segment'] == st.session_state['stats']['current_segment']]
-        previous_segment = filtered_df.loc[filtered_df['segment'] == st.session_state['stats']['current_segment'] - 1]
-        next_segment = filtered_df.loc[filtered_df['segment'] == st.session_state['stats']['current_segment'] + 1]
-        points = []
-        lines = []
-        if len(previous_segment) == 1:
-            points.append({
-                'latitude': previous_segment['start_lat'].values[0],
-                'longitude': previous_segment['start_lon'].values[0],
-                'color': [255, 111, 89]
-            })
-            points.append({
-                'latitude': previous_segment['end_lat'].values[0],
-                'longitude': previous_segment['end_lon'].values[0],
-                'color': [255, 111, 89]
-            })
-            lines.append({
-                'source_lon': previous_segment['start_lon'].values[0],
-                'source_lat': previous_segment['start_lat'].values[0],
-                'target_lon': previous_segment['end_lon'].values[0],
-                'target_lat': previous_segment['end_lat'].values[0],
-                'color': [255, 111, 89]
-            })
-            lines.append({
-                'source_lon': previous_segment['end_lon'].values[0],
-                'source_lat': previous_segment['end_lat'].values[0],
-                'target_lon': current_segment['start_lon'].values[0],
-                'target_lat': current_segment['start_lat'].values[0],
-                'color': [255, 111, 89]
-            })
-        points.append({
-            'latitude': current_segment['start_lat'].values[0],
-            'longitude': current_segment['start_lon'].values[0],
-            'color': [37, 68, 65]
-        })
-        points.append({
-            'latitude': current_segment['end_lat'].values[0],
-            'longitude': current_segment['end_lon'].values[0],
-            'color': [37, 68, 65]
-        })
-        lines.append({
-            'source_lon':  current_segment['start_lon'].values[0],
-            'source_lat':  current_segment['start_lat'].values[0],
-            'target_lon':  current_segment['end_lon'].values[0],
-            'target_lat':  current_segment['end_lat'].values[0],
-            'color': [37, 68, 65]
-        })
-        if len(next_segment) == 1:
-            points.append({
-                'latitude': next_segment['start_lat'].values[0],
-                'longitude': next_segment['start_lon'].values[0],
-                'color': [67, 170, 139]
-            })
-            points.append({
-                'latitude': next_segment['end_lat'].values[0],
-                'longitude': next_segment['end_lon'].values[0],
-                'color': [67, 170, 139]
-            })
-            lines.append({
-                'source_lon': next_segment['start_lon'].values[0],
-                'source_lat': next_segment['start_lat'].values[0],
-                'target_lon': next_segment['end_lon'].values[0],
-                'target_lat': next_segment['end_lat'].values[0],
-                'color': [67, 170, 139]
-            })
-            lines.append({
-                'source_lon': current_segment['end_lon'].values[0],
-                'source_lat': current_segment['end_lat'].values[0],
-                'target_lon': next_segment['start_lon'].values[0],
-                'target_lat': next_segment['start_lat'].values[0],
-                'color': [67, 170, 139]
-            })
+        current_segment = filtered_df.loc[filtered_df['segment'] == st.session_state['stats']['current_segment']+1]
+        filtered_df = grouped_df[grouped_df['segment'].isin([x for x in range(max(0, st.session_state['stats']['current_segment'] - 51), min(st.session_state['stats']['current_segment'] + 51, st.session_state['stats']['max_segment']+1))])].copy()
+        filtered_df = filtered_df.sort_values(by=['segment']).reset_index(drop=True)
 
         if pd.isna(current_segment['km_jump'].values[0]):
             zoom_level = calculate_zoom_level(next_segment['km_jump'].values[0])
@@ -510,12 +453,82 @@ def render_map():
             zoom_level = calculate_zoom_level(current_segment['km_jump'].values[0])
             radius = calculate_radius(zoom_level)
 
+        points = []
+        lines = []
+
+        cp = []
+
+        for _, segment in filtered_df.iterrows():
+            segment_color = [37, 68, 65]  # Default color (current segment)
+            
+            if segment['segment'] < st.session_state['stats']['current_segment']:
+                segment_color = [255, 111, 89]  # Previous segments
+            elif segment['segment'] > st.session_state['stats']['current_segment']:
+                segment_color = [67, 170, 139]  # Next segments
+            
+            # Add start point
+            if segment_color == [37, 68, 65]:
+                cp.append({
+                    'latitude': segment['start_lat'],
+                    'longitude': segment['start_lon'],
+                    'color': segment_color
+                })
+                
+                # Add end point
+                cp.append({
+                    'latitude': segment['end_lat'],
+                    'longitude': segment['end_lon'],
+                    'color': segment_color
+                })
+            else:
+                points.append({
+                    'latitude': segment['start_lat'],
+                    'longitude': segment['start_lon'],
+                    'color': segment_color
+                })
+                
+                # Add end point
+                points.append({
+                    'latitude': segment['end_lat'],
+                    'longitude': segment['end_lon'],
+                    'color': segment_color
+                })
+            
+            # Add line for the segment
+            lines.append({
+                'source_lon': segment['start_lon'],
+                'source_lat': segment['start_lat'],
+                'target_lon': segment['end_lon'],
+                'target_lat': segment['end_lat'],
+                'color': segment_color
+            })
+            
+            # Add line connecting to the next segment if it exists
+            if _ < len(filtered_df) - 1:
+                next_segment = filtered_df.iloc[_ + 1]
+                lines.append({
+                    'source_lon': segment['end_lon'],
+                    'source_lat': segment['end_lat'],
+                    'target_lon': next_segment['start_lon'],
+                    'target_lat': next_segment['start_lat'],
+                    'color': segment_color
+                })
+
         point_layer = pdk.Layer(
             'ScatterplotLayer',
             points,
             get_position='[longitude, latitude]',
             get_color='color',
             get_radius=radius,
+            pickable=True
+        )
+
+        cpoint_layer = pdk.Layer(
+            'ScatterplotLayer',
+            cp,
+            get_position='[longitude, latitude]',
+            get_color='color',
+            get_radius=radius*2,
             pickable=True
         )
 
@@ -538,7 +551,7 @@ def render_map():
         )
 
         deck = pdk.Deck(
-            layers=[point_layer, line_layer],
+            layers=[cpoint_layer, point_layer, line_layer],
             initial_view_state=view_state,
             map_style='light'
         )
@@ -589,7 +602,7 @@ def render_sidebar():
                     st.progress(st.session_state['stats']['annotated']/st.session_state['stats']['max_segment']) 
                 with st.container(border=True):
                     grouped_df = st.session_state['segment_df']
-                    filtered_df = grouped_df[grouped_df['segment'].isin([x for x in range(max(0, st.session_state['stats']['current_segment'] - 16), min(st.session_state['stats']['current_segment'] + 16, st.session_state['stats']['max_segment']+1))])].copy()
+                    filtered_df = grouped_df[grouped_df['segment'].isin([x for x in range(max(0, st.session_state['stats']['current_segment'] - 51), min(st.session_state['stats']['current_segment'] + 51, st.session_state['stats']['max_segment']+1))])].copy()
                     filtered_df.loc[:, 'matrix_color'] = filtered_df['fraud'].apply(get_matrix_color)
                     filtered_df.loc[filtered_df['segment'] == st.session_state['stats']['current_segment'], 'matrix_color'] = 'rgba(255, 209, 102, 255)'
                     filtered_df['size'] = 8
@@ -612,7 +625,7 @@ def render_sidebar():
                         y=filtered_df['start_lat'],
                         z=filtered_df['timestamp'],
                         mode='lines',
-                        line=dict(color='rgba(100, 100, 100, 0.5)', width=2)
+                        line=dict(color='rgba(100, 100, 100, 0.5)', width=4)
                     )
 
                     # Combine both traces
@@ -808,6 +821,8 @@ def main():
 if __name__ == "__main__":
     st.set_page_config(layout="wide")
     main()
+
+
 
 
 
