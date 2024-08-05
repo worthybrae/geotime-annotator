@@ -566,7 +566,7 @@ def render_sidebar():
     with st.sidebar:   
         if 'df' not in st.session_state:
             user_id = st.text_input('enter username:', 'w71')
-            device_id = st.text_input("enter device id:", '00000000-0000-0000-0000-000000000000', max_chars=36)
+            device_id = st.text_input("enter device id:", '00000000-0000-0000-0000-000000000000')
             truncation = st.number_input("enter truncation:", value=4, min_value=3, max_value=6)
             minutes = st.number_input("enter minutes:", value=1, min_value=1, max_value=60)
             km_threshold = st.number_input("enter km threshold:", value=10, min_value=1, max_value=1000)
