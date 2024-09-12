@@ -9,6 +9,7 @@ __pycache__/
 # Project specific
 secrets.toml
 data/
+.DS_Store
 
 # Distribution / packaging
 .Python
